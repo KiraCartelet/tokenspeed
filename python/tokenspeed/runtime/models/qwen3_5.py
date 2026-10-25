@@ -1041,7 +1041,7 @@ class Qwen3_5ForCausalLM(nn.Module):
         self.mapping = mapping
         self.hidden_size = config.hidden_size
 
-        alt_stream = torch.cuda.Stream()
+        alt_stream = torch.get_device_module().Stream()
 
         # Embedding layer
         self.embed_tokens = VocabParallelEmbedding(

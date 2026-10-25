@@ -1,0 +1,19 @@
+python -m tokenspeed.cli serve Qwen/Qwen3-0.6B \
+  --served-model-name qwen3-0.6b \
+  --device npu \
+  --dtype bfloat16 \
+  --kv-cache-dtype auto \
+  --attention-backend mha \
+  --sampling-backend greedy \
+  --disable-prefill-graph \
+  --disable-pdl \
+  --max-model-len 4096 \
+  --max-num-seqs 4 \
+  --max-total-tokens 16384 \
+  --chunked-prefill-size 4096 \
+  --prefix-granularity 128 \
+  --max-cudagraph-capture-size 4 \
+  --cudagraph-capture-sizes 1 2 4 \
+  --disable-autotune \
+  --host 127.0.0.1 \
+  --port 2601

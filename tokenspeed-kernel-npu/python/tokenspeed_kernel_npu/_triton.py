@@ -22,8 +22,13 @@
 
 import triton
 from triton import language as tl
-from triton import profiler as proton
+# from triton import profiler as proton
 from triton.language.extra import libdevice
+
+try:
+    from triton import profiler as proton
+except ImportError:
+    proton = None
 
 
 @triton.jit

@@ -44,6 +44,34 @@ def _scale(q: torch.Tensor, softmax_scale: float | None) -> float:
     return softmax_scale if softmax_scale is not None else 1.0 / math.sqrt(q.shape[-1])
 
 
+def _pad_rows(
+    x: torch.Tensor, bounds: torch.Tensor, max_length: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pack variable sequences as BSH without copying their lengths to the host."""
+    lengths = bounds[1:] - bounds[:-1]
+    positions = torch.arange(max_length, device=x.device)
+    valid = positions[None, :] < lengths[:, None]
+    indices = bounds[:-1, None].long() + positions[None, :]
+    indices = indices.clamp(max=max(x.shape[0] - 1, 0))
+    padded = torch.where(valid[:, :, None, None], x[indices], 0)
+    return padded.flatten(2), indices, valid
+
+
+def _unpad_rows(
+    padded: torch.Tensor,
+    indices: torch.Tensor,
+    valid: torch.Tensor,
+    q: torch.Tensor,
+) -> torch.Tensor:
+    # Mask padding before the reduction: all padding may map to a live row.
+    values = torch.where(
+        valid[:, :, None, None], padded.reshape(*indices.shape, *q.shape[1:]), 0
+    )
+    out = torch.zeros_like(q)
+    out.index_add_(0, indices.flatten(), values.flatten(0, 1))
+    return out
+
+
 def _check_options(
     *,
     window_left: int,
@@ -75,13 +103,33 @@ def mha_prefill(
     softmax_scale: float | None = None,
 ) -> torch.Tensor:
     """Run causal variable-length MHA over uncached K/V."""
-    del cu_seqlens, max_seqlen
     _check_options(
         window_left=window_left,
         logit_cap=logit_cap,
         sinks=sinks,
         return_lse=return_lse,
     )
+    if q.shape[-1] == 256:
+        if not q.shape[0]:
+            return torch.empty_like(q)
+        padded_q, indices, valid = _pad_rows(q, cu_seqlens, max_seqlen)
+        padded_k, _, _ = _pad_rows(k, cu_seqlens, max_seqlen)
+        padded_v, _, _ = _pad_rows(v, cu_seqlens, max_seqlen)
+        lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        output, _ = torch_npu.npu_fused_infer_attention_score(
+            padded_q,
+            padded_k,
+            padded_v,
+            atten_mask=_causal_mask(q.device) if max_seqlen > 1 else None,
+            actual_seq_lengths=lengths,
+            actual_seq_lengths_kv=lengths,
+            num_heads=q.shape[1],
+            num_key_value_heads=k.shape[1],
+            scale=_scale(q, softmax_scale),
+            input_layout="BSH",
+            sparse_mode=2 if max_seqlen > 1 else 0,
+        )
+        return _unpad_rows(output, indices, valid, q)
     output, _ = torch_npu.npu_fused_infer_attention_score(
         q,
         k,
@@ -120,7 +168,7 @@ def mha_extend_with_kvcache(
     enable_pdl: bool = False,
 ) -> torch.Tensor:
     """Run variable-length MHA over a paged K/V cache."""
-    del cu_seqlens_kv, max_seqlen_q, max_seqlen_k, enable_pdl
+    del cu_seqlens_kv, max_seqlen_k, enable_pdl
     _check_options(
         window_left=window_left,
         logit_cap=logit_cap,
@@ -129,6 +177,29 @@ def mha_extend_with_kvcache(
     )
     if q_scale is not None or k_scale is not None or v_scale is not None:
         raise NotImplementedError("Ascend MHA does not support scaled FP8 cache")
+
+    if q.shape[-1] == 256:
+        if not q.shape[0]:
+            return torch.empty_like(q)
+        padded_q, indices, valid = _pad_rows(q, cu_seqlens_q, max_seqlen_q)
+        output, _ = torch_npu.npu_fused_infer_attention_score(
+            padded_q,
+            k_cache.flatten(2),
+            v_cache.flatten(2),
+            atten_mask=(
+                _causal_mask(q.device) if is_causal and max_seqlen_q > 1 else None
+            ),
+            actual_seq_lengths=cu_seqlens_q[1:] - cu_seqlens_q[:-1],
+            actual_seq_lengths_kv=cache_seqlens,
+            block_table=page_table,
+            num_heads=q.shape[1],
+            num_key_value_heads=k_cache.shape[2],
+            scale=_scale(q, softmax_scale),
+            input_layout="BSH",
+            sparse_mode=3 if is_causal and max_seqlen_q > 1 else 0,
+            block_size=k_cache.shape[1],
+        )
+        return _unpad_rows(output, indices, valid, q)
 
     output, _ = torch_npu.npu_fused_infer_attention_score(
         q,
