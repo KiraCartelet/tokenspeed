@@ -22,15 +22,21 @@
 
 import torch
 import torch_npu
-
 from tokenspeed_kernel_npu._triton import tl, triton
 
 
 def gdn_prefill(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-    g: torch.Tensor, beta: torch.Tensor, *, scale: float | None,
-    initial_state: torch.Tensor, cu_seqlens: torch.Tensor,
-    qk_l2norm: bool, output_final_state: bool,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    *,
+    scale: float | None,
+    initial_state: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    qk_l2norm: bool,
+    output_final_state: bool,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Scan packed sequences and return outputs and optional final K-last states.
 
@@ -74,7 +80,7 @@ def gdn_prefill(
         index = sequence_ids[token : token + 1]
         current = state.index_select(0, index)[0] * decay[token, :, None, None]
         key = k_work[token]
-        delta = (values[token] - (current * key[:, None, :]).sum(-1))
+        delta = values[token] - (current * key[:, None, :]).sum(-1)
         delta = delta * gates[token, :, None]
         current = current + delta[:, :, None] * key[:, None, :]
         out[0, token] = (current * q_work[token, :, None, :]).sum(-1)
@@ -84,15 +90,28 @@ def gdn_prefill(
 
 
 @triton.jit(do_not_specialize=["s0", "s1", "s2", "s3"])
-def _copy_decode_state(Pool, Scratch, Reads, Writes, s0, s1, s2, s3,
-                       H: tl.constexpr, V: tl.constexpr, K: tl.constexpr,
-                       GATHER: tl.constexpr, BLOCK: tl.constexpr):
+def _copy_decode_state(
+    Pool,
+    Scratch,
+    Reads,
+    Writes,
+    s0,
+    s1,
+    s2,
+    s3,
+    H: tl.constexpr,
+    V: tl.constexpr,
+    K: tl.constexpr,
+    GATHER: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
     row = tl.program_id(0)
     offsets = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     read = tl.load(Reads + row).to(tl.int64)
     page = read if GATHER else tl.load(Writes + row).to(tl.int64)
-    pool_offsets = (page * s0 + offsets // (V * K) * s1
-                    + offsets // K % V * s2 + offsets % K * s3)
+    pool_offsets = (
+        page * s0 + offsets // (V * K) * s1 + offsets // K % V * s2 + offsets % K * s3
+    )
     scratch_offsets = row * (H * V * K) + offsets
     valid = (offsets < H * V * K) & (read >= 0) & (page >= 0)
     if GATHER:
@@ -104,10 +123,18 @@ def _copy_decode_state(Pool, Scratch, Reads, Writes, s0, s1, s2, s3,
 
 
 def gdn_decode(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *,
-    A_log: torch.Tensor, a: torch.Tensor, dt_bias: torch.Tensor, b: torch.Tensor,
-    initial_state: torch.Tensor, initial_state_indices: torch.Tensor,
-    output_state_indices: torch.Tensor | None, scale: float | None,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    A_log: torch.Tensor,
+    a: torch.Tensor,
+    dt_bias: torch.Tensor,
+    b: torch.Tensor,
+    initial_state: torch.Tensor,
+    initial_state_indices: torch.Tensor,
+    output_state_indices: torch.Tensor | None,
+    scale: float | None,
     use_qk_l2norm: bool,
 ) -> torch.Tensor:
     """Run native single-token decode and update the selected K-last pages.
@@ -131,27 +158,56 @@ def gdn_decode(
         raise ValueError("Invalid K-last state pool shape")
     if batch == 0:
         return torch.empty_like(v)
-    writes = initial_state_indices if output_state_indices is None else output_state_indices
-    scratch = torch.empty((batch, value_heads, value_width, width),
-                          dtype=torch.bfloat16, device=q.device)
+    writes = (
+        initial_state_indices if output_state_indices is None else output_state_indices
+    )
+    scratch = torch.empty(
+        (batch, value_heads, value_width, width), dtype=torch.bfloat16, device=q.device
+    )
     grid = (batch, triton.cdiv(value_heads * value_width * width, 1024))
-    _copy_decode_state[grid](initial_state, scratch, initial_state_indices, writes,
-                             *initial_state.stride(), value_heads, value_width, width,
-                             True, 1024)
+    _copy_decode_state[grid](
+        initial_state,
+        scratch,
+        initial_state_indices,
+        writes,
+        *initial_state.stride(),
+        value_heads,
+        value_width,
+        width,
+        True,
+        1024,
+    )
     query, key = q[:, 0].float(), k[:, 0].float()
     if use_qk_l2norm:
         query = query * torch.rsqrt(query.square().sum(-1, keepdim=True) + 1e-6)
         key = key * torch.rsqrt(key.square().sum(-1, keepdim=True) + 1e-6)
-    g = -A_log.float().exp() * torch.nn.functional.softplus(a[:, 0].float() + dt_bias.float())
+    g = -A_log.float().exp() * torch.nn.functional.softplus(
+        a[:, 0].float() + dt_bias.float()
+    )
     beta = b[:, 0].float().sigmoid().bfloat16()
     out = torch_npu.npu_recurrent_gated_delta_rule(
-        query.bfloat16(), key.bfloat16(), v[:, 0].contiguous(), scratch,
-        beta=beta, scale=width**-0.5 if scale is None else scale,
+        query.bfloat16(),
+        key.bfloat16(),
+        v[:, 0].contiguous(),
+        scratch,
+        beta=beta,
+        scale=width**-0.5 if scale is None else scale,
         actual_seq_lengths=torch.ones(batch, dtype=torch.int32, device=q.device),
         ssm_state_indices=torch.arange(batch, dtype=torch.int32, device=q.device),
-        num_accepted_tokens=None, g=g.contiguous(), gk=None,
+        num_accepted_tokens=None,
+        g=g.contiguous(),
+        gk=None,
     )
-    _copy_decode_state[grid](initial_state, scratch, initial_state_indices, writes,
-                             *initial_state.stride(), value_heads, value_width, width,
-                             False, 1024)
+    _copy_decode_state[grid](
+        initial_state,
+        scratch,
+        initial_state_indices,
+        writes,
+        *initial_state.stride(),
+        value_heads,
+        value_width,
+        width,
+        False,
+        1024,
+    )
     return out.masked_fill((initial_state_indices < 0)[:, None, None], 0).unsqueeze(1)

@@ -29,16 +29,13 @@ from tokenspeed_kernel.signature import format_signatures
 if current_platform().is_npu:
     from tokenspeed_kernel_npu.ops.gdn import gdn_decode, gdn_prefill
 
-
     @register_kernel(
         "attention",
         "gdn_chunk_prefill",
         name="ascend_gdn_chunk_prefill",
         solution="ascend",
         capability=CapabilityRequirement(vendors=frozenset({"ascend"})),
-        signatures=format_signatures(
-            ("q", "k", "v"), "dense", {torch.bfloat16}
-        ),
+        signatures=format_signatures(("q", "k", "v"), "dense", {torch.bfloat16}),
         priority=Priority.PORTABLE,
         traits={
             "head_dim": frozenset({128}),
@@ -84,9 +81,10 @@ if current_platform().is_npu:
         )
         return GdnChunkPrefillResult(out=out, final_state=final)
 
-
     @register_kernel(
-        "attention", "gdn_decode_step", name="ascend_gdn_decode_step",
+        "attention",
+        "gdn_decode_step",
+        name="ascend_gdn_decode_step",
         solution="ascend",
         capability=CapabilityRequirement(vendors=frozenset({"ascend"})),
         signatures=format_signatures(("q", "k", "v"), "dense", {torch.bfloat16}),
@@ -94,16 +92,32 @@ if current_platform().is_npu:
         traits={"head_dim": frozenset({128})},
     )
     def ascend_gdn_decode_step(
-        q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *,
-        A_log: torch.Tensor, a: torch.Tensor, dt_bias: torch.Tensor, b: torch.Tensor,
-        initial_state: torch.Tensor, initial_state_indices: torch.Tensor,
-        output_state_indices: torch.Tensor | None, scale: float | None,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        A_log: torch.Tensor,
+        a: torch.Tensor,
+        dt_bias: torch.Tensor,
+        b: torch.Tensor,
+        initial_state: torch.Tensor,
+        initial_state_indices: torch.Tensor,
+        output_state_indices: torch.Tensor | None,
+        scale: float | None,
         use_qk_l2norm: bool,
     ) -> torch.Tensor:
         """Run native Ascend decode with gdn_decode_step's indexed state contract."""
         return gdn_decode(
-            q, k, v, A_log=A_log, a=a, dt_bias=dt_bias, b=b,
-            initial_state=initial_state, initial_state_indices=initial_state_indices,
-            output_state_indices=output_state_indices, scale=scale,
+            q,
+            k,
+            v,
+            A_log=A_log,
+            a=a,
+            dt_bias=dt_bias,
+            b=b,
+            initial_state=initial_state,
+            initial_state_indices=initial_state_indices,
+            output_state_indices=output_state_indices,
+            scale=scale,
             use_qk_l2norm=use_qk_l2norm,
         )

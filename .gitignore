@@ -202,3 +202,6 @@ Testing/
 AGENTS.local.md
 AGENTS.override.md
 outputs/
+
+# Local experiment logs and machine-specific handoff notes
+/artifacts/
